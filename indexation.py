@@ -7,7 +7,10 @@ et persiste la base vectorielle FAISS sur disque.
 
 Usage :
     python indexation.py
+    
 """
+import pandas as pd
+from html.parser import HTMLParser
 
 import os
 import json
@@ -21,6 +24,50 @@ from sentence_transformers import SentenceTransformer
 load_dotenv()
 
 # ─────────────────────────────────────────────
+from bs4 import BeautifulSoup
+
+def nettoyer_html(html: str) -> str:
+    """Supprime les balises HTML avec BeautifulSoup."""
+    soup = BeautifulSoup(html, 'html.parser')
+    texte = soup.get_text(separator=' ')
+    import re
+    texte = re.sub(r'\s+', ' ', texte)
+    return texte.strip()
+
+def nettoyer_nom(nom: str) -> str:
+    """Nettoie le nom du médicament."""
+    import re
+    nom = nom.strip()
+    nom = re.sub(r'\s+', ' ', nom)
+    return nom
+
+def charger_csv(chemin: str, limite: int = 20) -> list[dict]:
+    """Charge les notices médicales depuis le CSV BDPM."""
+    df = pd.read_csv(chemin, encoding='latin-1', sep='\t')
+    documents = []
+    for _, row in df.head(limite).iterrows():
+        html = str(row['RCP_html'])
+        html = html.encode('latin-1').decode('utf-8', errors='replace')
+        soup = BeautifulSoup(html, 'html.parser')
+        texte = soup.get_text(separator=' ')
+        import re
+        texte = re.sub(r'\s+', ' ', texte).strip()
+
+        nom_tag = (soup.find(class_='AmmDenomination') or soup.find(class_='AmmCorpsTexteGras'))
+        if nom_tag:
+            nom = nettoyer_nom(nom_tag.get_text())
+        else:
+            nom = f"Médicament {row['Code_CIS']}"
+
+        documents.append({
+            "medicament": nom,
+            "section": "Notice complète",
+            "texte": texte
+        })
+    return documents
+
+
+
 # CONFIGURATION
 # ─────────────────────────────────────────────
 MODELE_EMBEDDING = "paraphrase-multilingual-mpnet-base-v2"  # multilingue, idéal pour le français
@@ -503,7 +550,8 @@ def main():
 
     # ── 1. Construction du corpus ───────────────────────────────
     print("\n[1/4] Construction du corpus...")
-    documents_bruts = corpus_fallback()
+    documents_bruts = charger_csv("data/CIS_RCP.csv", limite=20)
+    print(f"  {len(documents_bruts)} notices chargées depuis le CSV.")
 
     # Tentative d'enrichissement via l'API (optionnel)
     # Décommenter pour essayer l'API en ligne :
