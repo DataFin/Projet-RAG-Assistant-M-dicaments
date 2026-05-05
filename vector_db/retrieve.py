@@ -1,43 +1,13 @@
-def retrieve(question, sentence_transformer, collection=None, n=3):
-    """
-    Retourne les n chunks les plus pertinents pour une question donnée.
+import json
+# Permet de récupérer les données indéxés
+def load_chunks(path="data/chunks_meta.json"):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+    
 
-    Pour l’instant : MOCK
-    Plus tard : recherche vectorielle réelle (FAISS / Chroma)
-    """
+def retrieve(question, model, collection=None, n=3):
+    chunks = load_chunks()
 
-    # MOCK de chunks (simulation de la base vectorielle)
-    chunks = [
-        {
-            "medicament": "Doliprane",
-            "section": "Effets indésirables",
-            "contenu": (
-                "Le paracétamol peut provoquer des réactions cutanées, "
-                "des troubles hépatiques en cas de surdosage, "
-                "et plus rarement des troubles sanguins."
-            ),
-        },
-        {
-            "medicament": "Ibuprofène",
-            "section": "Contre-indications",
-            "contenu": (
-                "L’ibuprofène est contre-indiqué en cas d’ulcère gastro-duodénal, "
-                "d’insuffisance rénale sévère ou de dernier trimestre de grossesse."
-            ),
-        },
-        {
-            "medicament": "Amoxicilline",
-            "section": "Posologie",
-            "contenu": (
-                "La posologie usuelle chez l’adulte est de 1 g trois fois par jour, "
-                "à adapter selon la gravité de l’infection."
-            ),
-        },
-    ]
-
-    # Plus tard :
-    # - calcul embedding de la question
-    # - similarité cosinus
-    # - tri par score
-
+    # Pour l'instant : sélection naïve
+    # (suffisant pour valider tout le RAG)
     return chunks[:n], None
