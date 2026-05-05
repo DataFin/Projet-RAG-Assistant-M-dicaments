@@ -4,7 +4,8 @@ import json
 import os 
 
 import chromadb
-from vector_db import retrieve
+
+from vector_db.retrieve import retrieve
 
 #Permet de transformer les phrases en vecteurs numériques
 from sentence_transformers import SentenceTransformer
@@ -20,32 +21,41 @@ def read_file(file_path):
 
 # Permet de faire le formatage de mes chunks 
 def format_chunks(chunks):
-    formatted_chunks = []
+    formatted = []
 
     for chunk in chunks:
-        formatted_chunks.append(
-            f"Médicament : {chunk['medicament']}\n"
-            f"Section : {chunk['section']}\n"
+        formatted.append(
+            f"ID : {chunk['id']}\n"
+            f"Médicament : {chunk['metadata']['medicament']}\n"
+            f"Section : {chunk['metadata']['section']}\n"
+            f"Source : {chunk['metadata']['source']}\n"
             f"Contenu : {chunk['contenu']}"
         )
 
-    return "\n\n---\n\n".join(formatted_chunks)
+    return "\n\n---\n\n".join(formatted)
+
+
+# Chargement UNIQUE du modèle (au démarrage)
+EMBEDDING_MODEL = SentenceTransformer(
+    "distiluse-base-multilingual-cased-v2",
+    cache_folder="./models"
+)
 
 def build_context(question):
     context = read_file(file_path="context.txt")
-    # Chargement d'un modèle pré-entrainé de sentence-transformers
-    sentence_transformer_object = SentenceTransformer(
-        "distiluse-base-multilingual-cased-v2"
-    )
 
     chroma = chromadb.PersistentClient(path="./my_first_vector_db")
     collection = chroma.get_or_create_collection("random_knowledge")
 
-    chunks, _ = retrieve(question, sentence_transformer_object, collection, n=3)
+    chunks, _ = retrieve(
+        question,
+        EMBEDDING_MODEL,
+        collection,
+        n=3
+    )
+
     context_filled = context.replace("{{Chunks}}", format_chunks(chunks))
-
     return context_filled
-
 
 
 
@@ -75,5 +85,5 @@ def answer_question(question):
 
 if __name__ == "__main__":
 
-    response = answer_question(question="Comment s'appelle le champignon de mon gnome ? il est de couleur bleu?")
+    response = answer_question(question="J'ai des douleurs d'intensité légères. A quoi cela peut il etre du ?")
     print(response)
