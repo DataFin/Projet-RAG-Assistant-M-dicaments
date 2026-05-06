@@ -85,5 +85,5 @@ def answer_question(question):
 
 if __name__ == "__main__":
 
-    response = answer_question(question="J'ai des douleurs d'intensité légères. A quoi cela peut il etre du ?")
+    response = answer_question(question="Quels sont les effets secondaires du Doliprane  ?")
     print(response)
