@@ -59,31 +59,16 @@ def build_context(question):
 
 
 
-def answer_question(question):
+def answer_contexte_clinique(contexte_patient: str):
 
     client = Groq(api_key=os.environ["GROQ_API_KEY"])
 
     chat_completion = client.chat.completions.create(
         messages=[
-
-            {
-                "role": "system",
-                "content": build_context(question),
-            },
-
-            {
-                "role": "user",
-                "content": question,
-            }
+            {"role": "system", "content": build_context(contexte_patient)},
+            {"role": "user", "content": contexte_patient}
         ],
-
         model="llama-3.3-70b-versatile"
     )
 
     return chat_completion.choices[0].message.content
-
-
-if __name__ == "__main__":
-
-    response = answer_question(question="Quels sont les effets secondaires du Doliprane  ?")
-    print(response)
