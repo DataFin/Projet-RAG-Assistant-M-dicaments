@@ -7,10 +7,7 @@ et persiste la base vectorielle FAISS sur disque.
 
 Usage :
     python indexation.py
-    
 """
-import pandas as pd
-from html.parser import HTMLParser
 
 import os
 import json
@@ -18,21 +15,78 @@ import time
 import requests
 import numpy as np
 import faiss
+import pandas as pd
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
+from bs4 import BeautifulSoup
 
 load_dotenv()
 
 # ─────────────────────────────────────────────
-from bs4 import BeautifulSoup
+# CONFIGURATION
+# ─────────────────────────────────────────────
+MODELE_EMBEDDING = "paraphrase-multilingual-mpnet-base-v2"
+TAILLE_CHUNK = 600
+OVERLAP_CHUNK = 80
+CHEMIN_INDEX = "data/faiss_index.bin"
+CHEMIN_META  = "data/chunks_meta.json"
+
+MEDICAMENTS_CORPUS = [
+    "doliprane", "dafalgan", "efferalgan",
+    "ibuprofène", "advil", "nurofen",
+    "aspirin", "aspégic",
+    "amoxicilline", "augmentin",
+    "smecta", "imodium",
+    "ventoline",
+    "oméprazole", "inexium",
+    "metformine", "glucophage",
+]
+
+# ─────────────────────────────────────────────
+# ÉTAPE 0 – TÉLÉCHARGEMENT / EXTRACTION ZIP
+# ─────────────────────────────────────────────
+
+def telecharger_bdpm(dossier: str = "data") -> str:
+    """
+    Extrait le fichier ZIP BDPM et retourne le chemin du fichier CSV.
+    """
+    import zipfile
+
+    chemin_zip = os.path.join(dossier, "cis-rcp.zip")
+    chemin_csv = os.path.join(dossier, "CIS_RCP.csv")
+
+    if os.path.exists(chemin_csv):
+        print(f"  ✓ Fichier déjà extrait → {chemin_csv}")
+        return chemin_csv
+
+    if os.path.exists(chemin_zip):
+        print(f"  Extraction de {chemin_zip}...")
+        with zipfile.ZipFile(chemin_zip, 'r') as z:
+            print(f"  Fichiers dans le ZIP : {z.namelist()}")
+            z.extractall(dossier)
+        for nom in os.listdir(dossier):
+            if nom.endswith('.csv') and 'RCP' in nom.upper():
+                chemin_csv = os.path.join(dossier, nom)
+                print(f"  ✓ Fichier extrait → {chemin_csv}")
+                return chemin_csv
+
+    raise FileNotFoundError(
+        "Placez le fichier cis-rcp.zip dans le dossier data/ et relancez le script."
+    )
+
+
+# ─────────────────────────────────────────────
+# ÉTAPE 1 – NETTOYAGE ET CHARGEMENT CSV
+# ─────────────────────────────────────────────
 
 def nettoyer_html(html: str) -> str:
     """Supprime les balises HTML avec BeautifulSoup."""
+    import re
     soup = BeautifulSoup(html, 'html.parser')
     texte = soup.get_text(separator=' ')
-    import re
     texte = re.sub(r'\s+', ' ', texte)
     return texte.strip()
+
 
 def nettoyer_nom(nom: str) -> str:
     """Nettoie le nom du médicament."""
@@ -41,98 +95,68 @@ def nettoyer_nom(nom: str) -> str:
     nom = re.sub(r'\s+', ' ', nom)
     return nom
 
-def charger_csv(chemin: str, limite: int = 20) -> list[dict]:
-    """Charge les notices médicales depuis le CSV BDPM."""
+
+def charger_csv(chemin: str, limite: int = 50) -> list[dict]:
+    """
+    Charge les notices médicales depuis le CSV BDPM.
+    Extrait chaque section clinique séparément pour un chunking sémantique.
+    """
+    import re
+
+    SECTIONS_CIBLES = {
+        "4.1": "Indications thérapeutiques",
+        "4.2": "Posologie",
+        "4.3": "Contre-indications",
+        "4.4": "Mises en garde",
+        "4.5": "Interactions médicamenteuses",
+        "4.8": "Effets indésirables",
+        "4.9": "Surdosage",
+    }
+
     df = pd.read_csv(chemin, encoding='latin-1', sep='\t')
     documents = []
+
     for _, row in df.head(limite).iterrows():
         html = str(row['RCP_html'])
         html = html.encode('latin-1').decode('utf-8', errors='replace')
         soup = BeautifulSoup(html, 'html.parser')
-        texte = soup.get_text(separator=' ')
-        import re
-        texte = re.sub(r'\s+', ' ', texte).strip()
 
-        nom_tag = (soup.find(class_='AmmDenomination') or soup.find(class_='AmmCorpsTexteGras'))
-        if nom_tag:
-            nom = nettoyer_nom(nom_tag.get_text())
-        else:
-            nom = f"Médicament {row['Code_CIS']}"
+        nom_tag = (soup.find(class_='AmmDenomination') or
+                   soup.find(class_='AmmCorpsTexteGras'))
+        nom = nettoyer_nom(nom_tag.get_text()) if nom_tag else f"Médicament {row['Code_CIS']}"
 
-        documents.append({
-            "medicament": nom,
-            "section": "Notice complète",
-            "texte": texte
-        })
+        titres = soup.find_all(class_='AmmAnnexeTitre2')
+        for titre in titres:
+            titre_texte = titre.get_text().strip()
+
+            section_nom = None
+            for code, nom_section in SECTIONS_CIBLES.items():
+                if titre_texte.startswith(code):
+                    section_nom = nom_section
+                    break
+
+            if not section_nom:
+                continue
+
+            contenu = []
+            for element in titre.find_next_siblings():
+                if 'AmmAnnexeTitre2' in element.get('class', []):
+                    break
+                texte = element.get_text(separator=' ').strip()
+                if texte:
+                    contenu.append(texte)
+
+            texte_section = ' '.join(contenu)
+            texte_section = re.sub(r'\s+', ' ', texte_section).strip()
+
+            if len(texte_section) > 50:
+                documents.append({
+                    "medicament": nom,
+                    "section": section_nom,
+                    "texte": f"{section_nom} du médicament {nom} : {texte_section}",
+                })
+
     return documents
-
-
-
-# CONFIGURATION
-# ─────────────────────────────────────────────
-MODELE_EMBEDDING = "paraphrase-multilingual-mpnet-base-v2"  # multilingue, idéal pour le français
-TAILLE_CHUNK = 600       # caractères max par chunk
-OVERLAP_CHUNK = 80       # chevauchement entre chunks consécutifs
-CHEMIN_INDEX = "data/faiss_index.bin"
-CHEMIN_META  = "data/chunks_meta.json"
-
-# Corpus : liste de médicaments courants à indexer
-MEDICAMENTS_CORPUS = [
-    "doliprane", "dafalgan", "efferalgan",     # paracétamol
-    "ibuprofène", "advil", "nurofen",           # ibuprofène
-    "aspirin", "aspégic",                       # aspirine
-    "amoxicilline", "augmentin",                # antibiotiques
-    "smecta", "imodium",                        # digestif
-    "ventoline",                                # asthme
-    "oméprazole", "inexium",                    # estomac
-    "metformine", "glucophage",                 # diabète
-]
-
-# ─────────────────────────────────────────────
-# ÉTAPE 1 – RÉCUPÉRATION DES DONNÉES VIA API
-# ─────────────────────────────────────────────
-
-def recuperer_medicament_api(nom: str) -> dict | None:
-    """
-    Interroge l'API publique de la BDPM pour un médicament donné.
-    Retourne un dictionnaire avec les informations clés, ou None si introuvable.
-    """
-    url = "https://api.medicaments.gouv.fr/1.0/medicaments"
-    try:
-        response = requests.get(url, params={"denomination": nom}, timeout=10)
-        response.raise_for_status()
-        data = response.json()
-        if data and isinstance(data, list) and len(data) > 0:
-            return data[0]  # on prend le premier résultat
-    except Exception as e:
-        print(f"  [WARN] API indisponible pour '{nom}' : {e}")
-    return None
-
-
-def construire_texte_medicament(nom: str, data: dict) -> str:
-    """
-    Convertit les données JSON d'un médicament en texte libre structuré
-    pour maximiser la pertinence lors de l'embedding.
-    """
-    lignes = [f"MÉDICAMENT : {nom.upper()}"]
-
-    denomination = data.get("denomination", "")
-    if denomination:
-        lignes.append(f"Dénomination officielle : {denomination}")
-
-    forme = data.get("formePharmaceutique", "")
-    if forme:
-        lignes.append(f"Forme pharmaceutique : {forme}")
-
-    voie = data.get("voiesAdministration", "")
-    if voie:
-        lignes.append(f"Voie d'administration : {voie}")
-
-    statut = data.get("statutAdministratifAmm", "")
-    if statut:
-        lignes.append(f"Statut AMM : {statut}")
-
-    return "\n".join(lignes)
 
 
 # ─────────────────────────────────────────────
@@ -141,9 +165,9 @@ def construire_texte_medicament(nom: str, data: dict) -> str:
 
 def corpus_fallback() -> list[dict]:
     """
-    Corpus local de secours utilisé si l'API est indisponible.
-    Chaque entrée représente une section de notice médicale.
-    Les sections reflètent la structure réelle d'une notice ANSM.
+    Corpus local de médicaments courants avec sections détaillées.
+    Le nom du médicament et la section sont inclus dans le texte
+    pour améliorer la pertinence de la recherche vectorielle.
     """
     return [
         # ── DOLIPRANE / PARACÉTAMOL ──────────────────────────────────────
@@ -151,7 +175,8 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Doliprane (paracétamol)",
             "section": "Indications",
             "texte": (
-                "Le Doliprane (paracétamol) est indiqué pour le traitement symptomatique des douleurs "
+                "Indications du Doliprane (paracétamol) : "
+                "Le Doliprane est indiqué pour le traitement symptomatique des douleurs "
                 "d'intensité légère à modérée et/ou des états fébriles. Il est utilisé contre les maux de tête, "
                 "les douleurs dentaires, les douleurs musculaires, les états grippaux et la fièvre."
             ),
@@ -160,7 +185,8 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Doliprane (paracétamol)",
             "section": "Posologie",
             "texte": (
-                "Posologie adulte : 500 mg à 1 g par prise, 3 à 4 fois par jour si nécessaire. "
+                "Posologie du Doliprane (paracétamol) : "
+                "Adulte : 500 mg à 1 g par prise, 3 à 4 fois par jour si nécessaire. "
                 "Ne pas dépasser 4 g par jour (soit 8 comprimés de 500 mg ou 4 comprimés de 1 g). "
                 "Respecter un intervalle d'au moins 4 heures entre chaque prise. "
                 "En cas d'insuffisance rénale ou hépatique, espacer les prises à minimum 8 heures."
@@ -170,6 +196,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Doliprane (paracétamol)",
             "section": "Contre-indications",
             "texte": (
+                "Contre-indications du Doliprane (paracétamol) : "
                 "Contre-indiqué en cas d'allergie au paracétamol ou à l'un des excipients. "
                 "Contre-indiqué en cas d'insuffisance hépatique sévère. "
                 "Déconseillé en cas de consommation régulière et importante d'alcool. "
@@ -181,6 +208,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Doliprane (paracétamol)",
             "section": "Effets indésirables",
             "texte": (
+                "Effets indésirables du Doliprane (paracétamol) : "
                 "Rares à très rares : réactions allergiques (éruption cutanée, urticaire, choc anaphylactique). "
                 "Exceptionnels : atteintes hépatiques graves en cas de surdosage. "
                 "Très rare : thrombopénie, leucopénie. "
@@ -191,6 +219,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Doliprane (paracétamol)",
             "section": "Interactions médicamenteuses",
             "texte": (
+                "Interactions médicamenteuses du Doliprane (paracétamol) : "
                 "Association déconseillée avec : les anticoagulants oraux (warfarine) en cas de prise régulière "
                 "et prolongée, l'alcool (risque d'atteinte hépatique). "
                 "Précautions avec : les inducteurs enzymatiques (rifampicine, carbamazépine) qui réduisent "
@@ -202,6 +231,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Ibuprofène (Advil, Nurofen)",
             "section": "Indications",
             "texte": (
+                "Indications de l'ibuprofène (Advil, Nurofen) : "
                 "L'ibuprofène est un anti-inflammatoire non stéroïdien (AINS) indiqué dans : "
                 "les douleurs légères à modérées (maux de tête, douleurs dentaires, douleurs menstruelles, "
                 "douleurs musculaires et articulaires), les états fébriles, et les douleurs rhumatismales."
@@ -211,6 +241,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Ibuprofène (Advil, Nurofen)",
             "section": "Posologie",
             "texte": (
+                "Posologie de l'ibuprofène (Advil, Nurofen) : "
                 "Adulte et enfant > 40 kg : 200 à 400 mg par prise, 3 fois par jour. "
                 "Dose maximale : 1 200 mg par jour en automédication. "
                 "Prendre pendant les repas pour limiter les troubles digestifs. "
@@ -221,6 +252,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Ibuprofène (Advil, Nurofen)",
             "section": "Contre-indications",
             "texte": (
+                "Contre-indications de l'ibuprofène (Advil, Nurofen) : "
                 "Contre-indiqué en cas d'allergie aux AINS ou à l'aspirine (risque de réaction croisée). "
                 "Contre-indiqué à partir du 6e mois de grossesse. "
                 "Contre-indiqué en cas d'ulcère gastroduodénal actif, d'insuffisance rénale, hépatique "
@@ -231,6 +263,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Ibuprofène (Advil, Nurofen)",
             "section": "Effets indésirables",
             "texte": (
+                "Effets indésirables de l'ibuprofène (Advil, Nurofen) : "
                 "Fréquents : troubles digestifs (nausées, vomissements, douleurs abdominales, diarrhées). "
                 "Peu fréquents : maux de tête, vertiges, réactions allergiques cutanées. "
                 "Rares : ulcère gastrique, hémorragie digestive (surtout en cas d'utilisation prolongée). "
@@ -241,6 +274,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Ibuprofène (Advil, Nurofen)",
             "section": "Interactions médicamenteuses",
             "texte": (
+                "Interactions médicamenteuses de l'ibuprofène (Advil, Nurofen) : "
                 "Ne pas associer à d'autres AINS ni à l'aspirine (risque de toxicité additive). "
                 "Prudence avec les anticoagulants (risque hémorragique), les diurétiques et les IEC "
                 "(risque d'insuffisance rénale). "
@@ -252,8 +286,9 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Aspirine (Aspégic)",
             "section": "Indications",
             "texte": (
+                "Indications de l'aspirine (Aspégic) : "
                 "L'aspirine (acide acétylsalicylique) est utilisée comme antalgique, antipyrétique et "
-                "anti-inflammatoire à doses élevées (500 mg – 1 g). À faibles doses (75–325 mg), elle est "
+                "anti-inflammatoire à doses élevées (500 mg - 1 g). À faibles doses (75-325 mg), elle est "
                 "indiquée en prévention des accidents cardiovasculaires (antiagrégant plaquettaire)."
             ),
         },
@@ -261,6 +296,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Aspirine (Aspégic)",
             "section": "Posologie",
             "texte": (
+                "Posologie de l'aspirine (Aspégic) : "
                 "Antalgique/antipyrétique adulte : 500 mg à 1 g par prise, toutes les 4 à 6 heures. "
                 "Maximum 3 g par jour. "
                 "Antiagrégant plaquettaire : 75 à 160 mg par jour (sur prescription médicale). "
@@ -271,6 +307,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Aspirine (Aspégic)",
             "section": "Contre-indications",
             "texte": (
+                "Contre-indications de l'aspirine (Aspégic) : "
                 "Contre-indiqué chez les enfants et adolescents de moins de 16 ans atteints d'un syndrome "
                 "viral (risque de syndrome de Reye). "
                 "Contre-indiqué en cas d'allergie aux salicylés ou AINS. "
@@ -282,6 +319,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Aspirine (Aspégic)",
             "section": "Effets indésirables",
             "texte": (
+                "Effets indésirables de l'aspirine (Aspégic) : "
                 "Fréquents : troubles digestifs (nausées, douleurs épigastriques, risque d'ulcère). "
                 "Risque hémorragique (saignements digestifs, cutanés). "
                 "Rares : réactions allergiques (urticaire, bronchospasme chez les asthmatiques sensibles). "
@@ -292,6 +330,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Aspirine (Aspégic)",
             "section": "Interactions médicamenteuses",
             "texte": (
+                "Interactions médicamenteuses de l'aspirine (Aspégic) : "
                 "Contre-indiqué avec le méthotrexate à fortes doses. "
                 "Déconseillé avec les anticoagulants oraux (risque hémorragique majeur). "
                 "Déconseillé avec les autres AINS, l'ibuprofène notamment. "
@@ -303,17 +342,18 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Amoxicilline (Augmentin)",
             "section": "Indications",
             "texte": (
+                "Indications de l'amoxicilline (Augmentin) : "
                 "L'amoxicilline est un antibiotique de la famille des pénicillines, indiqué dans le traitement "
                 "des infections bactériennes : angines streptococciques, sinusites, otites moyennes aiguës, "
                 "bronchites, pneumonies, infections urinaires, infections cutanées. "
-                "L'Augmentin (amoxicilline + acide clavulanique) couvre un spectre plus large incluant les "
-                "bactéries productrices de bêtalactamases."
+                "L'Augmentin (amoxicilline + acide clavulanique) couvre un spectre plus large."
             ),
         },
         {
             "medicament": "Amoxicilline (Augmentin)",
             "section": "Posologie",
             "texte": (
+                "Posologie de l'amoxicilline (Augmentin) : "
                 "Adulte : 1 g deux à trois fois par jour selon la gravité de l'infection. "
                 "Durée de traitement : généralement 5 à 10 jours. Ne jamais interrompre le traitement "
                 "avant la fin (risque de résistance). "
@@ -325,6 +365,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Amoxicilline (Augmentin)",
             "section": "Contre-indications",
             "texte": (
+                "Contre-indications de l'amoxicilline (Augmentin) : "
                 "Contre-indiqué en cas d'allergie aux pénicillines ou aux céphalosporines (allergie croisée). "
                 "Contre-indiqué en cas de mononucléose infectieuse (risque de rash cutané). "
                 "Prudence en cas d'insuffisance rénale (adaptation posologique nécessaire)."
@@ -334,6 +375,7 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Amoxicilline (Augmentin)",
             "section": "Effets indésirables",
             "texte": (
+                "Effets indésirables de l'amoxicilline (Augmentin) : "
                 "Fréquents : troubles digestifs (diarrhées, nausées, vomissements), surtout avec l'Augmentin. "
                 "Peu fréquents : réactions allergiques cutanées (rash, urticaire). "
                 "Rares mais graves : choc anaphylactique (allergie sévère), colite pseudomembraneuse. "
@@ -345,22 +387,22 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Smecta (diosmectite)",
             "section": "Indications et posologie",
             "texte": (
-                "Le Smecta (diosmectite) est un antidiarrhéique d'action locale indiqué dans le traitement "
+                "Indications et posologie du Smecta (diosmectite) : "
+                "Le Smecta est un antidiarrhéique d'action locale indiqué dans le traitement "
                 "symptomatique des diarrhées aiguës et chroniques chez l'adulte et l'enfant. "
                 "Adulte : 3 sachets par jour, dilués dans de l'eau. "
-                "En cas de diarrhée aiguë, la dose peut être doublée en début de traitement. "
-                "Il agit en tapissant la muqueuse intestinale et en absorbant les toxines et agents infectieux."
+                "En cas de diarrhée aiguë, la dose peut être doublée en début de traitement."
             ),
         },
         {
             "medicament": "Imodium (lopéramide)",
-            "section": "Indications, posologie et contre-indications",
+            "section": "Indications et posologie",
             "texte": (
-                "L'Imodium (lopéramide) est un antidiarrhéique d'action centrale indiqué dans les diarrhées "
+                "Indications et posologie de l'Imodium (lopéramide) : "
+                "L'Imodium est un antidiarrhéique d'action centrale indiqué dans les diarrhées "
                 "aiguës et chroniques. Il ralentit le transit intestinal. "
                 "Adulte : 2 mg (1 gélule) après chaque selle liquide, sans dépasser 8 mg par jour. "
-                "Contre-indiqué dans les diarrhées sanglantes, les infections intestinales bactériennes "
-                "prouvées, et chez l'enfant de moins de 2 ans. "
+                "Contre-indiqué dans les diarrhées sanglantes et les infections intestinales bactériennes. "
                 "Ne pas utiliser plus de 48 heures sans avis médical."
             ),
         },
@@ -369,7 +411,8 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Ventoline (salbutamol)",
             "section": "Indications",
             "texte": (
-                "La Ventoline (salbutamol) est un bronchodilatateur de courte durée d'action (bêta-2 agoniste) "
+                "Indications de la Ventoline (salbutamol) : "
+                "La Ventoline est un bronchodilatateur de courte durée d'action (bêta-2 agoniste) "
                 "indiqué dans le traitement et la prévention des crises d'asthme et des bronchospasmes "
                 "associés à la broncho-pneumopathie chronique obstructive (BPCO)."
             ),
@@ -378,12 +421,12 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Ventoline (salbutamol)",
             "section": "Posologie et effets indésirables",
             "texte": (
+                "Posologie et effets indésirables de la Ventoline (salbutamol) : "
                 "En cas de crise : 1 à 2 bouffées (100 à 200 microgrammes). "
                 "Peut être répété après 5 minutes si nécessaire. "
                 "Ne pas dépasser 8 bouffées par jour sans avis médical. "
                 "Effets indésirables : tremblements des mains (fréquents), tachycardie, palpitations, "
-                "céphalées. Rare : hypokaliémie en cas de doses élevées. "
-                "Si les crises surviennent plus de 3 fois par semaine, consulter un médecin."
+                "céphalées. Rare : hypokaliémie en cas de doses élevées."
             ),
         },
         # ── OMÉPRAZOLE / INEXIUM ─────────────────────────────────────────
@@ -391,21 +434,21 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Oméprazole (Inexium / ésoméprazole)",
             "section": "Indications",
             "texte": (
+                "Indications de l'oméprazole (Inexium / ésoméprazole) : "
                 "L'oméprazole et l'ésoméprazole (Inexium) sont des inhibiteurs de la pompe à protons (IPP). "
-                "Indiqués dans : le reflux gastro-œsophagien (RGO), l'ulcère gastroduodénal, "
+                "Indiqués dans : le reflux gastro-oesophagien (RGO), l'ulcère gastroduodénal, "
                 "l'éradication d'Helicobacter pylori (en association), la gastroprotection lors de prise d'AINS."
             ),
         },
         {
             "medicament": "Oméprazole (Inexium / ésoméprazole)",
-            "section": "Posologie, effets indésirables et interactions",
+            "section": "Posologie et effets indésirables",
             "texte": (
+                "Posologie et effets indésirables de l'oméprazole (Inexium / ésoméprazole) : "
                 "Posologie habituelle : 20 à 40 mg par jour, le matin à jeun. "
                 "Effets indésirables fréquents : maux de tête, diarrhées, nausées, constipation, flatulences. "
-                "Prise prolongée : risque de carence en magnésium, en vitamine B12, "
-                "et augmentation du risque de fractures osseuses. "
-                "Interactions : réduit l'absorption de certains médicaments (clopidogrel, antifongiques). "
-                "Ne pas arrêter brutalement un traitement prolongé."
+                "Prise prolongée : risque de carence en magnésium, en vitamine B12. "
+                "Interactions : réduit l'absorption de certains médicaments (clopidogrel, antifongiques)."
             ),
         },
         # ── METFORMINE / GLUCOPHAGE ──────────────────────────────────────
@@ -413,7 +456,8 @@ def corpus_fallback() -> list[dict]:
             "medicament": "Metformine (Glucophage)",
             "section": "Indications",
             "texte": (
-                "La metformine (Glucophage) est un antidiabétique oral de la classe des biguanides, "
+                "Indications de la metformine (Glucophage) : "
+                "La metformine est un antidiabétique oral de la classe des biguanides, "
                 "indiqué dans le traitement du diabète de type 2, en première intention, "
                 "notamment chez les patients en surpoids. "
                 "Elle agit en diminuant la production hépatique de glucose et en améliorant "
@@ -422,16 +466,15 @@ def corpus_fallback() -> list[dict]:
         },
         {
             "medicament": "Metformine (Glucophage)",
-            "section": "Posologie, effets indésirables et contre-indications",
+            "section": "Posologie et effets indésirables",
             "texte": (
-                "Posologie : débuter à 500 mg 1 à 2 fois par jour pendant les repas, "
-                "augmenter progressivement. Dose maximale : 3 g par jour. "
+                "Posologie et effets indésirables de la metformine (Glucophage) : "
+                "Débuter à 500 mg 1 à 2 fois par jour pendant les repas, augmenter progressivement. "
+                "Dose maximale : 3 g par jour. "
                 "Effets indésirables : troubles digestifs très fréquents en début de traitement "
-                "(nausées, diarrhées, douleurs abdominales) — atténués si prise pendant les repas. "
+                "(nausées, diarrhées, douleurs abdominales). "
                 "Risque rare mais grave : acidose lactique (surtout en cas d'insuffisance rénale). "
-                "Contre-indiqué en cas d'insuffisance rénale sévère (DFG < 30 mL/min), "
-                "d'insuffisance hépatique, d'alcoolisme. "
-                "Arrêter 48 h avant injection de produit de contraste iodé."
+                "Contre-indiqué en cas d'insuffisance rénale sévère (DFG < 30 mL/min)."
             ),
         },
     ]
@@ -444,10 +487,8 @@ def corpus_fallback() -> list[dict]:
 def chunker(texte: str, taille_max: int = TAILLE_CHUNK, overlap: int = OVERLAP_CHUNK) -> list[str]:
     """
     Découpe un texte en chunks avec chevauchement.
-    Priorité : découpage sur les sauts de ligne doubles (paragraphes),
-    puis sur les phrases, puis par tranche de caractères.
+    Priorité : paragraphes > phrases > espaces.
     """
-    # Si le texte est déjà court, pas besoin de découper
     if len(texte) <= taille_max:
         return [texte.strip()]
 
@@ -458,13 +499,11 @@ def chunker(texte: str, taille_max: int = TAILLE_CHUNK, overlap: int = OVERLAP_C
         fin = debut + taille_max
 
         if fin >= len(texte):
-            # Dernier morceau
             chunk = texte[debut:].strip()
             if chunk:
                 chunks.append(chunk)
             break
 
-        # Chercher un séparateur naturel (paragraphe > phrase > espace)
         coupure = texte.rfind("\n\n", debut, fin)
         if coupure == -1:
             coupure = texte.rfind(".\n", debut, fin)
@@ -479,7 +518,6 @@ def chunker(texte: str, taille_max: int = TAILLE_CHUNK, overlap: int = OVERLAP_C
         if chunk:
             chunks.append(chunk)
 
-        # Avancer avec overlap
         debut = max(debut + 1, coupure + 1 - overlap)
 
     return chunks
@@ -492,7 +530,6 @@ def chunker(texte: str, taille_max: int = TAILLE_CHUNK, overlap: int = OVERLAP_C
 def embedder_chunks(chunks: list[str], modele: SentenceTransformer) -> np.ndarray:
     """
     Transforme une liste de chunks en vecteurs via sentence-transformers.
-    Affiche une progression tous les 10 chunks.
     """
     vecteurs = []
     total = len(chunks)
@@ -511,16 +548,11 @@ def embedder_chunks(chunks: list[str], modele: SentenceTransformer) -> np.ndarra
 
 def creer_index_faiss(vecteurs: np.ndarray) -> faiss.Index:
     """
-    Crée un index FAISS à partir des vecteurs normalisés.
-    On utilise IndexFlatIP (produit scalaire) avec vecteurs L2-normalisés
-    pour obtenir une similarité cosinus, plus appropriée pour du texte.
+    Crée un index FAISS avec similarité cosinus (IndexFlatIP + normalisation L2).
     """
     dimension = vecteurs.shape[1]
-
-    # Normalisation L2 pour simuler la similarité cosinus
     faiss.normalize_L2(vecteurs)
-
-    index = faiss.IndexFlatIP(dimension)  # IP = Inner Product (produit scalaire)
+    index = faiss.IndexFlatIP(dimension)
     index.add(vecteurs)
     print(f"  Index FAISS créé : {index.ntotal} vecteurs, dimension {dimension}.")
     return index
@@ -528,8 +560,7 @@ def creer_index_faiss(vecteurs: np.ndarray) -> faiss.Index:
 
 def sauvegarder_index(index: faiss.Index, chunks_avec_meta: list[dict], chemin_index: str, chemin_meta: str):
     """
-    Persiste l'index FAISS et les métadonnées associées sur disque.
-    Les deux fichiers doivent rester en phase : même ordre, même nombre d'entrées.
+    Persiste l'index FAISS et les métadonnées sur disque.
     """
     os.makedirs(os.path.dirname(chemin_index), exist_ok=True)
     faiss.write_index(index, chemin_index)
@@ -550,18 +581,10 @@ def main():
 
     # ── 1. Construction du corpus ───────────────────────────────
     print("\n[1/4] Construction du corpus...")
-    documents_bruts = charger_csv("data/CIS_RCP.csv", limite=20)
-    print(f"  {len(documents_bruts)} notices chargées depuis le CSV.")
-
-    # Tentative d'enrichissement via l'API (optionnel)
-    # Décommenter pour essayer l'API en ligne :
-    # for nom in MEDICAMENTS_CORPUS:
-    #     data = recuperer_medicament_api(nom)
-    #     if data:
-    #         texte = construire_texte_medicament(nom, data)
-    #         documents_bruts.append({"medicament": nom, "section": "API BDPM", "texte": texte})
-
-    print(f"  {len(documents_bruts)} sections de notices chargées.")
+    chemin_csv = telecharger_bdpm()
+    documents_bruts = charger_csv(chemin_csv, limite=50)
+    documents_bruts += corpus_fallback()
+    print(f"  {len(documents_bruts)} sections chargées au total (CSV + corpus manuel).")
 
     # ── 2. Chunking ────────────────────────────────────────────
     print("\n[2/4] Chunking des documents...")
