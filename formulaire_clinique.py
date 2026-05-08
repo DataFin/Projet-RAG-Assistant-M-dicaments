@@ -2,29 +2,26 @@
 FORMULAIRE CLINIQUE - ENVOI AU RAG + EXPORT PDF
 """
 
-from rag import answer_contexte_clinique
+from rag import RAG
 from pdf_export import generer_pdf_rapport
 import json
 import re
+
 
 def extraire_recommandations(json_part: str) -> list:
     """
     Extraction robuste des recommandations depuis la sortie JSON du LLM.
     Ne fait jamais planter le pipeline.
     """
-
     if not json_part:
         return []
 
-    # 🔹 Nettoyage : on garde uniquement le bloc { ... }
     match = re.search(r"\{[\s\S]*\}", json_part)
     if not match:
         print("⚠️ Aucun bloc JSON détecté")
         return []
 
     json_str = match.group(0)
-
-    # 🔹 Normalisation des guillemets éventuels
     json_str = json_str.replace("“", '"').replace("”", '"')
 
     try:
@@ -40,16 +37,14 @@ def extraire_recommandations(json_part: str) -> list:
     except json.JSONDecodeError as e:
         print(f"⚠️ JSON invalide malgré nettoyage : {e}")
         return []
-    
+
+
 def separer_texte_et_json(reponse_llm: str) -> tuple[str, str]:
     """
     Sépare la réponse texte du LLM et le bloc JSON final.
-    Retourne (texte_humain, json_str)
     """
-
     debut_json = reponse_llm.find("{")
     if debut_json == -1:
-        # Pas de JSON trouvé
         return reponse_llm.strip(), ""
 
     texte = reponse_llm[:debut_json].strip()
@@ -100,22 +95,34 @@ AUTRES INFORMATIONS :
 
 
 def main():
+    # ✅ 1. Collecte via le formulaire
     data_patient = collecter_formulaire_patient()
     contexte = construire_contexte_patient(data_patient)
 
+    # ✅ 2. Initialisation du RAG (UNE fois)
+    rag = RAG(vector_db_path="data/chroma_db")
+
     print("\n🔍 Analyse via la base BDPM...")
-    reponse_rag = answer_contexte_clinique(contexte)
+
+    # ✅ 3. Le CONTEXTE PATIENT est envoyé tel quel au RAG
+    reponse_rag = rag.answer(contexte)
+
+    # ✅ 4. Séparation texte / JSON
     texte_humain, json_part = separer_texte_et_json(reponse_rag)
 
-    # ✅ Génération du PDF (même si aucune reco trouvée)
+    # ✅ 5. Génération systématique du PDF
     generer_pdf_rapport(
         patient_id=data_patient["identifiant"],
         contexte_patient=contexte,
         reponse_rag=texte_humain
     )
+
+    # ✅ 6. Extraction optionnelle des recommandations
     recommandations = extraire_recommandations(json_part)
+
     print("\n✅ Rapport PDF généré avec succès.")
 
 
 if __name__ == "__main__":
     main()
+    
