@@ -4,6 +4,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib import colors
 
 
 def generer_pdf_rapport(
@@ -12,8 +13,8 @@ def generer_pdf_rapport(
     reponse_rag: str
 ):
     """
-    Génère un rapport PDF d’aide à la décision clinique,
-    même si aucune recommandation n’est trouvée.
+    Génère un rapport PDF d’aide à la décision clinique
+    avec identité visuelle MediRAG.
     """
 
     os.makedirs("exports", exist_ok=True)
@@ -34,119 +35,120 @@ def generer_pdf_rapport(
 
     styles = getSampleStyleSheet()
 
-    # Styles personnalisés
+    # ======================================================
+    # Styles personnalisés MediRAG
+    # ======================================================
+
     styles.add(ParagraphStyle(
-        name="TitreCentre",
-        parent=styles["Title"],
-        alignment=TA_CENTER
+        name="TitreMediRAG",
+        fontSize=22,
+        textColor=colors.HexColor("#0D9488"),
+        alignment=TA_CENTER,
+        spaceAfter=6,
+        fontName="Helvetica-Bold"
+    ))
+
+    styles.add(ParagraphStyle(
+        name="SousTitre",
+        fontSize=10,
+        textColor=colors.grey,
+        alignment=TA_CENTER,
+        spaceAfter=16
     ))
 
     styles.add(ParagraphStyle(
         name="Section",
-        parent=styles["Heading2"],
-        spaceBefore=12,
-        spaceAfter=6
+        fontSize=13,
+        fontName="Helvetica-Bold",
+        spaceBefore=16,
+        spaceAfter=8,
+        textColor=colors.HexColor("#334155")
     ))
 
     styles.add(ParagraphStyle(
-        name="NormalJustifie",
-        parent=styles["Normal"],
+        name="Texte",
+        fontSize=10,
         alignment=TA_LEFT,
-        spaceAfter=6
+        spaceAfter=8
     ))
 
     styles.add(ParagraphStyle(
         name="Disclaimer",
-        parent=styles["Italic"],
-        textColor="grey",
-        spaceBefore=12
+        fontSize=9,
+        textColor=colors.red,
+        spaceBefore=20,
+        italic=True
     ))
 
     elements = []
 
-    # ─────────────────────────────
-    # Titre
-    # ─────────────────────────────
+    # ======================================================
+    # En-tête MediRAG
+    # ======================================================
+
+    elements.append(
+        Paragraph("🏥 MediRAG", styles["TitreMediRAG"])
+    )
+
     elements.append(
         Paragraph(
-            "Rapport d’aide à la décision clinique",
-            styles["TitreCentre"]
+            "Assistant d’aide à la décision médicale<br/>"
+            "Basé sur les notices officielles ANSM (BDPM)",
+            styles["SousTitre"]
         )
     )
+
     elements.append(
         Paragraph(
-            f"Généré le {datetime.now().strftime('%d/%m/%Y %H:%M')}",
-            styles["Italic"]
+            f"Rapport généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}",
+            styles["SousTitre"]
         )
     )
+
     elements.append(Spacer(1, 20))
 
-    # ─────────────────────────────
+    # ======================================================
     # Contexte patient
-    # ─────────────────────────────
-    elements.append(Paragraph("1. Contexte patient", styles["Section"]))
+    # ======================================================
+
+    elements.append(
+        Paragraph("1. Contexte patient", styles["Section"])
+    )
+
     elements.append(
         Paragraph(
             contexte_patient.replace("\n", "<br/>"),
-            styles["NormalJustifie"]
+            styles["Texte"]
         )
     )
-    elements.append(Spacer(1, 12))
 
-    # ─────────────────────────────
+    # ======================================================
     # Analyse RAG
-    # ─────────────────────────────
+    # ======================================================
+
     elements.append(
-        Paragraph(
-            "2. Analyse issue de la base BDPM",
-            styles["Section"]
-        )
+        Paragraph("2. Analyse issue de la base BDPM", styles["Section"])
     )
 
     elements.append(
         Paragraph(
             reponse_rag.replace("\n", "<br/>"),
-            styles["NormalJustifie"]
+            styles["Texte"]
         )
     )
 
-    # ─────────────────────────────
-    # Conclusion standardisée
-    # ─────────────────────────────
-    elements.append(Spacer(1, 12))
-    elements.append(
-        Paragraph(
-            "3. Conclusion clinique",
-            styles["Section"]
-        )
-    )
-
-    if "aucun médicament" in reponse_rag.lower():
-        conclusion = (
-            "Aucun médicament pertinent n’a pu être identifié dans le corpus "
-            "BDPM fourni pour ce contexte clinique. Une évaluation médicale "
-            "complète est nécessaire."
-        )
-    else:
-        conclusion = (
-            "Des options médicamenteuses ont été identifiées à partir des "
-            "notices officielles BDPM. Leur prescription éventuelle relève "
-            "de la responsabilité du professionnel de santé."
-        )
-
-    elements.append(Paragraph(conclusion, styles["NormalJustifie"]))
-
-    # ─────────────────────────────
+    # ======================================================
     # Disclaimer
-    # ─────────────────────────────
-    elements.append(Spacer(1, 20))
+    # ======================================================
+
     elements.append(
         Paragraph(
-            "⚠️ Ces informations ne remplacent pas l’avis d’un professionnel de santé.",
+            "⚠️ Ces informations ne remplacent pas l’avis d’un professionnel de santé. "
+            "Toute décision thérapeutique relève de la responsabilité du praticien.",
             styles["Disclaimer"]
         )
     )
 
     doc.build(elements)
 
-    print(f"📄 Rapport PDF généré : {filename}")
+    print(f"📄 Rapport PDF MediRAG généré : {filename}")
