@@ -34,7 +34,7 @@ st.set_page_config(
 )
 
 # ======================================================
-# STYLE CSS (inchangé)
+# STYLE CSS
 # ======================================================
 
 st.markdown("""
@@ -83,12 +83,7 @@ button[kind="primary"]:hover {
 hr {
     border: none;
     height: 1px;
-    background: linear-gradient(
-        90deg,
-        rgba(0,0,0,0) 0%,
-        #CBD5E1 50%,
-        rgba(0,0,0,0) 100%
-    );
+    background: linear-gradient(90deg, rgba(0,0,0,0) 0%, #CBD5E1 50%, rgba(0,0,0,0) 100%);
     margin: 32px 0;
 }
 
@@ -97,20 +92,26 @@ footer { visibility: hidden; }
 """, unsafe_allow_html=True)
 
 # ======================================================
-# HEADER — TITRE & SOUS-TITRE CENTRÉS
+# HEADER — CADUCEE SVG + TITRE
 # ======================================================
 
 st.markdown("""
-<h1 style="text-align:center; font-size:48px; color:#065F46;">
-🏥 MediRAG
-</h1>
-
-<p style="text-align:center; font-size:20px; font-weight:700; color:#047857;">
-Assistant d’aide à la décision médicale — Notices officielles ANSM (BDPM)
-</p>
+<div style="text-align:center; margin-bottom:1.5rem;">
+    <svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <rect x="30" y="6" width="4" height="52" rx="2" fill="#047857"/>
+        <path d="M32 12 C44 16 44 26 32 30 C20 34 20 44 32 48" stroke="#065F46" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+        <path d="M32 12 C20 16 20 26 32 30 C44 34 44 44 32 48" stroke="#14B8A6" stroke-width="3.5" stroke-linecap="round" fill="none"/>
+        <path d="M32 11 C26 6 14 8 14 13 C14 16 22 16 32 14" stroke="#047857" stroke-width="2" fill="#D1FAE5" stroke-linecap="round"/>
+        <path d="M32 11 C38 6 50 8 50 13 C50 16 42 16 32 14" stroke="#047857" stroke-width="2" fill="#D1FAE5" stroke-linecap="round"/>
+        <ellipse cx="32" cy="50" rx="3.5" ry="2.5" fill="#14B8A6"/>
+        <path d="M32 52 L30 55 M32 52 L34 55" stroke="#047857" stroke-width="1.5" stroke-linecap="round"/>
+    </svg>
+    <h1 style="font-size:48px; color:#065F46; margin:0.5rem 0 0;">MediRAG</h1>
+    <p style="font-size:20px; font-weight:700; color:#047857; margin:0;">Assistant d'aide à la décision médicale — Notices officielles ANSM (BDPM)</p>
+</div>
 """, unsafe_allow_html=True)
 
-st.warning("⚠️ Ces informations ne remplacent pas l’avis d’un professionnel de santé.")
+st.warning("⚠️ Ces informations ne remplacent pas l'avis d'un professionnel de santé.")
 
 # ======================================================
 # INITIALISATION SYSTEME
@@ -125,7 +126,7 @@ def init_systeme():
 rag, vectordb = init_systeme()
 
 # ======================================================
-# BASE DE CONNAISSANCES & GUIDE — ALIGNEMENT PARFAIT
+# BASE DE CONNAISSANCES & GUIDE
 # ======================================================
 
 col_stats, col_guide = st.columns(2, gap="large")
@@ -137,7 +138,7 @@ with col_stats:
     st.markdown("- **Type de documents** : Notices officielles")
 
 with col_guide:
-    st.markdown("### Guide d’utilisation")
+    st.markdown("### Guide d'utilisation")
     st.markdown("- **Saisir les informations cliniques du patient**")
     st.markdown("- **Décrire précisément les symptômes et le contexte médical**")
     st.markdown("- **Analyser les recommandations issues des notices officielles ANSM**")
@@ -244,6 +245,6 @@ st.markdown("""
 <hr>
 <p style="text-align:center; font-size:12px; color:#475569;">
 MediRAG — Assistant médical basé sur les notices officielles ANSM (BDPM).<br>
-Outil d’aide à la décision clinique, non substitut à un avis médical.
+Outil d'aide à la décision clinique, non substitut à un avis médical.
 </p>
 """, unsafe_allow_html=True)
