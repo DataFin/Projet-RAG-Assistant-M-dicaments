@@ -19,19 +19,26 @@ pip install -r requirements.txt
 # 3. Configurer la clé API Groq
 echo "GROQ_API_KEY=votre_clé_ici" > .env
 
-# 4. Indexer la base (une seule fois — idempotent)
+# 4. Télécharger la base de médicaments BDPM
+Téléchargez le fichier `cis-rcp.zip` depuis data.gouv.fr :
+https://www.data.gouv.fr/fr/datasets/base-de-donnees-publique-des-medicaments-medicaments-fr/
+
+Placez le fichier dans le dossier `data/` :
+
+# 5. Indexer la base (une seule fois — idempotent)
 python indexation.py
 
-# 5a. Lancer l'interface web Streamlit
+# 6a. Lancer l'interface web Streamlit
 streamlit run formulaire_streamlit.py
 
-# 5b. Ou lancer l'interface CLI
+# 6b. Ou lancer l'interface CLI
 python formulaire_clinique.py
 ```
 
 ---
 
 ## Architecture
+
 
 ```
 PHASE 1 — INDEXATION (indexation.py)
