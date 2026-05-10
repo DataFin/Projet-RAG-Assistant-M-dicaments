@@ -1,7 +1,7 @@
-# RAG Médicaments — Assistant d'information pharmaceutique
+# MediRAG — Assistant d'aide à la décision médicale
 
-Système RAG (Retrieval-Augmented Generation) construit avec Python, FAISS et Groq.
-Ce projet répond à des questions sur les médicaments courants à partir de notices officielles ANSM.
+Système RAG (Retrieval-Augmented Generation) construit avec Python, ChromaDB et Groq.
+Ce projet répond à des questions sur les médicaments à partir des notices officielles ANSM (BDPM).
 
 ---
 
@@ -19,11 +19,14 @@ pip install -r requirements.txt
 # 3. Configurer la clé API Groq
 echo "GROQ_API_KEY=votre_clé_ici" > .env
 
-# 4. Indexer la base (à faire une seule fois)
+# 4. Indexer la base (une seule fois — idempotent)
 python indexation.py
 
-# 5. Lancer l'assistant
-python rag.py
+# 5a. Lancer l'interface web Streamlit
+streamlit run formulaire_streamlit.py
+
+# 5b. Ou lancer l'interface CLI
+python formulaire_clinique.py
 ```
 
 ---
@@ -31,11 +34,77 @@ python rag.py
 ## Architecture
 
 ```
-PHASE 1 – INDEXATION (indexation.py)
-  Corpus notices → Chunking par section → Embedding → Index FAISS
-                                                          ↓
-PHASE 2 – INTERROGATION (rag.py)
-  Question → Reformulation → Embedding → Recherche FAISS → Groq LLaMA 3 → Réponse + sources
+PHASE 1 — INDEXATION (indexation.py)
+
+  CSV BDPM / API BDPM / Corpus fallback
+              ↓
+         DataLoader
+    Chargement + nettoyage HTML
+    Extraction sections et tableaux
+              ↓
+           Chunker
+    Découpage sémantique par section
+    puis par taille (600 car., overlap 80)
+              ↓
+           Embedder
+    paraphrase-multilingual-mpnet-base-v2
+    texte → vecteurs 768 dimensions
+              ↓
+           VectorDB
+    ChromaDB — stockage persistant
+    Idempotence native
+              ↓
+       data/chroma_db/
+
+
+PHASE 2 — UTILISATION (formulaire_streamlit.py / formulaire_clinique.py)
+
+  Médecin remplit le formulaire patient
+              ↓
+    AgentModerator — détection injections
+              ↓
+         RAG.answer(requete)
+    VectorDB.retrieve() → chunks pertinents
+    context.txt → prompt système
+    Groq LLaMA 3.3 → réponse structurée
+              ↓
+         CacheLLM — sauvegarde disque
+              ↓
+       pdf_export.py → rapport PDF
+```
+
+---
+
+## Structure du projet
+
+```
+Projet-RAG-Assistant-Médicaments/
+│
+├── pipeline/
+│   ├── config.py              → Constantes centralisées
+│   ├── data_loader.py         → class DataLoader (CSV + API + Fallback)
+│   ├── chunker.py             → class Chunker
+│   ├── embedder.py            → class Embedder
+│   ├── vector_store.py        → class VectorDB (ChromaDB)
+│   └── cache.py               → class CacheLLM
+│
+├── indexation.py              → Orchestrateur idempotent
+├── rag.py                     → class RAG (retrieval + sécurité + LLM)
+├── agent_moderator.py         → Détection prompt injections
+├── context.txt                → Prompt système externalisé
+├── formulaire_clinique.py     → Interface CLI
+├── formulaire_streamlit.py    → Interface Web Streamlit
+├── pdf_export.py              → Export PDF (ReportLab)
+│
+├── data/                      → Généré par indexation.py
+│   ├── chroma_db/             → Base vectorielle ChromaDB
+│   └── cache_llm.json         → Cache des réponses LLM
+│
+├── exports/                   → Rapports PDF générés
+├── requirements.txt
+├── .env                       → Clé API (non commité)
+├── .gitignore
+└── README.md
 ```
 
 ---
@@ -46,109 +115,105 @@ PHASE 2 – INTERROGATION (rag.py)
 `paraphrase-multilingual-mpnet-base-v2` (768 dimensions)
 
 Choisi car le corpus est en français. Ce modèle est entraîné sur 50+ langues
-et produit des embeddings de haute qualité pour des phrases et paragraphes courts.
+et reconnaît les paraphrases médicales ("mal de tête" = "céphalées").
 
 ### Stratégie de chunking
-Découpage **par section de notice** (Indications / Posologie / Contre-indications /
-Effets indésirables / Interactions médicamenteuses).
+Découpage à **deux niveaux** :
+1. **Sémantique** : chaque section de notice constitue un chunk distinct (Indications, Posologie, Contre-indications, Effets indésirables, Interactions, Mises en garde, Surdosage)
+2. **Par taille** : les sections longues sont redécoupées (600 car., overlap 80)
 
-Justification : une notice médicale est structurée sémantiquement — chaque section
-répond à un type de question différent. Conserver cette structure évite de mélanger
-la posologie avec les effets indésirables dans un même chunk.
+La métadonnée `section` permet au LLM de citer précisément l'origine de chaque information.
 
-Taille max : **600 caractères** avec **80 caractères d'overlap**.
-Ce format est adapté aux sections de notices (ni trop court, ni trop long pour le contexte Groq).
-
-### Index FAISS
-`IndexFlatIP` (produit scalaire) sur des vecteurs **normalisés L2**.
-Cela revient à calculer la similarité cosinus, plus pertinente que la distance euclidienne
-pour du texte sémantique. Un score proche de 1.0 = haute pertinence.
+### Base vectorielle
+**ChromaDB** (remplace FAISS) — persistance automatique, métadonnées intégrées,
+idempotence native via `get_or_create_collection()`.
+Le modèle d'embedding est sauvegardé dans les métadonnées de la collection,
+garantissant la cohérence entre indexation et recherche.
 
 ### Modèle LLM
-`llama3-70b-8192` (Groq) — meilleure qualité de raisonnement médical.
-Fallback : `llama3-8b-8192` si quota dépassé.
+`llama-3.3-70b-versatile` (Groq) — meilleure précision médicale.
+Temperature `0.2` pour des réponses factuelles et reproductibles.
 
-### Température
-`temperature=0.2` pour des réponses factuelless stables, évitant les hallucinations.
+### Sécurité
+`AgentModerator` détecte les tentatives de prompt injection par expressions régulières
+**avant** tout appel LLM — sans consommer de tokens.
+
+### Cache LLM
+Chaque réponse est mise en cache sur disque via hash MD5.
+L'API Groq n'est appelée qu'une seule fois par question unique.
 
 ---
 
-## Bonus implémentés
+## Fonctionnalités
 
-| Bonus | Description |
-|-------|-------------|
-| **A — Historique** | Les 3 derniers échanges sont injectés dans chaque appel Groq |
-| **B — Score de confiance** | Si le score FAISS < 0.25, avertissement affiché sans appel LLM |
-| **C — Reformulation** | Groq reformule la question en mots-clés médicaux avant la recherche |
+| Fonctionnalité | Description |
+|----------------|-------------|
+| Idempotence | `indexation.py` ne réindexe pas si la base existe déjà |
+| Seuil de confiance | Si score ChromaDB < 0.25 → pas d'appel LLM |
+| Cache LLM | Réponse instantanée si la question a déjà été posée |
+| AgentModerator | Blocage des prompt injections avant appel API |
+| Formulaire patient | Collecte profil clinique complet (âge, allergies, traitements...) |
+| Export PDF | Rapport de consultation archivable (ReportLab) |
+| Interface Streamlit | Design SaaS médical avec caducée SVG |
 
 ---
 
 ## Réponses aux questions de réflexion
 
 **Q1. Stratégie de chunking pour des notices longues ?**
-Chunking par section sémantique (Indications, Posologie…). Taille de 600 caractères
-adaptée au rapport signal/bruit des notices médicales.
+Chunking sémantique par section (Indications, Posologie...) puis par taille (600 car.)
+uniquement si la section est trop longue. L'overlap de 80 caractères préserve le contexte aux coupures.
 
 **Q2. Exploiter la structure des notices ?**
 Oui : chaque section est indexée comme un chunk distinct avec sa métadonnée `section`.
-Cela permet au LLM de citer la section exacte dans sa réponse.
+ChromaDB permet de filtrer nativement par section lors de la recherche.
 
 **Q3. Distinguer effets secondaires vs posologie ?**
-Via la métadonnée `section` stockée avec chaque chunk. Le LLM est guidé par le prompt
-à toujours citer la section source.
+Via la métadonnée `section` stockée avec chaque chunk dans ChromaDB.
+Le LLM est guidé par `context.txt` à toujours citer la section source.
 
 **Q4. Question portant sur deux médicaments ?**
 La recherche retourne k=4 chunks. Si la question mentionne deux médicaments,
-la reformulation (Bonus C) inclut les deux noms, et FAISS retourne des chunks des deux.
-Le prompt demande au LLM de les traiter séparément.
+ChromaDB retourne des chunks des deux. Le prompt demande au LLM de les traiter séparément
+et de signaler les interactions éventuelles.
 
 **Q5. Prompt système sécurisé ?**
-Le prompt interdit explicitement d'inventer, impose la citation des sources,
-et impose le disclaimer médical en fin de chaque réponse.
-
----
-
-## Structure du projet
-
-```
-rag_medicaments/
-├── indexation.py       # Pipeline d'indexation (Phase 1)
-├── rag.py              # Assistant Q&A (Phase 2)
-├── requirements.txt    # Dépendances Python
-├── README.md           # Ce fichier
-├── .gitignore          # .env et data/ exclus du git
-├── .env                # Clé API (non commité)
-└── data/               # Généré par indexation.py
-    ├── faiss_index.bin
-    └── chunks_meta.json
-```
+Le prompt `context.txt` interdit explicitement d'inventer, impose la citation des sources,
+et requiert le disclaimer médical. L'`AgentModerator` bloque en amont les tentatives
+de contournement avant tout appel LLM.
 
 ---
 
 ## Exemple de session
 
 ```
-💊 Votre question : Quels sont les effets secondaires de l'ibuprofène ?
+🏥 MediRAG — Clinical Decision Support
 
-  🔍 Recherche sur : « ibuprofène effets indésirables effets secondaires »
+Identifiant patient : PAT_001
+Âge : 8 ans
+Poids : 25 kg
+Allergies : aucune
+Symptômes : fièvre 38.5°C, douleurs musculaires
+Question : Quelle dose de Doliprane donner à cet enfant ?
 
-  ⏳ Génération de la réponse...
+🔍 Recherche dans les notices ANSM...
+⏳ Génération de la recommandation médicale...
 
-D'après la notice officielle de l'ibuprofène (Advil, Nurofen), section "Effets indésirables" [Source 1] :
+D'après la notice officielle du Doliprane (paracétamol), section "Posologie" [Source 1] :
 
-Les effets indésirables les plus fréquents sont :
-- **Troubles digestifs** : nausées, vomissements, douleurs abdominales, diarrhées (surtout si pris à jeun)
-- **Maux de tête et vertiges** (peu fréquents)
-- **Réactions allergiques cutanées** (rares)
-- En cas d'utilisation prolongée : risque d'ulcère gastrique et d'hémorragie digestive
+Pour un enfant de 25 kg, la dose recommandée est de 15 mg/kg par prise,
+soit 375 mg par prise, toutes les 4 à 6 heures.
+Ne pas dépasser 4 prises par jour.
+
+Aucune contre-indication détectée pour ce profil patient.
 
 ⚕️ Ces informations ne remplacent pas l'avis d'un professionnel de santé.
 
 📚 Sources consultées :
-  [1] Ibuprofène (Advil, Nurofen) — Effets indésirables (pertinence : 91%)
-  [2] Ibuprofène (Advil, Nurofen) — Contre-indications (pertinence : 74%)
+  [1] Doliprane (paracétamol) — Posologie (pertinence : 91%)
+  [2] Doliprane (paracétamol) — Contre-indications (pertinence : 74%)
 ```
 
 ---
 
-*Document pédagogique – Cours RAG & LLM*
+*Document pédagogique — Cours RAG & LLM*
